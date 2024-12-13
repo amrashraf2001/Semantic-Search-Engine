@@ -58,10 +58,9 @@ class VecDB:
             self.generate_database(db_size)
         else:
             if not os.path.exists(self.index_path):
-                raise ValueError("You need to provide the index file")
-            vectors = self.get_all_rows()
-            vectors = [(idx, vector) for idx, vector in enumerate(vectors)]
-            self._IVF_index(vectors, self.index_path)
+                vectors = self.get_all_rows()
+                vectors = [(idx, vector) for idx, vector in enumerate(vectors)]
+                self._IVF_index(vectors, self.index_path)
             # Load centroids from a file
             centroids_path = os.path.join(self.index_path, "centroids.bin")
             self.centroids = []
