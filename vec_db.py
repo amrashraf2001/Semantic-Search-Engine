@@ -62,7 +62,21 @@ class VecDB:
             vectors = self.get_all_rows()
             vectors = [(idx, vector) for idx, vector in enumerate(vectors)]
             self._IVF_index(vectors, self.index_path)
-        
+            # Load centroids from a file
+            centroids_path = os.path.join(self.index_path, "centroids.bin")
+            self.centroids = []
+            predefined_length = DIMENSION  # Assuming the predefined length is the same as DIMENSION
+            
+            with open(centroids_path, "rb") as f:
+                while True:
+                    # Define the size of each centroid (adjust based on the number of floats per centroid)
+                    centroid_size = len(self.centroids[0]) if self.centroids else predefined_length
+                    bytes_to_read = centroid_size * struct.calcsize("f")
+                    data = f.read(bytes_to_read)
+                    if not data:
+                        break
+                    centroid = struct.unpack(f"{centroid_size}f", data)
+                    self.centroids.append(centroid)
     
     def _IVF_index(self, data, index_dir):
         """
