@@ -1,6 +1,7 @@
 from typing import Dict, List, Annotated
 from sklearn.cluster import KMeans
 from heapq import nlargest
+import heapq
 import struct
 import numpy as np
 import os
@@ -9,46 +10,74 @@ DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
 
+# class ProductQuantizer:
+#     def __init__(self, n_subvectors=2, n_clusters=256):
+#         self.n_subvectors = n_subvectors
+#         self.n_clusters = n_clusters
+#         self.kmeans_list = [KMeans(n_clusters=self.n_clusters, random_state=42) for _ in range(n_subvectors)]
+
+#     def fit(self, data):
+#         subvector_length = data.shape[1] // self.n_subvectors
+#         self.centroids = []
+
+#         for i, kmeans in enumerate(self.kmeans_list):
+#             subdata = data[:, i * subvector_length:(i + 1) * subvector_length]
+#             kmeans.fit(subdata)
+#             self.centroids.append(kmeans.cluster_centers_)
+
+#     def encode(self, vector):
+#         subvector_length = vector.shape[0] // self.n_subvectors
+#         codes = []
+
+#         for i, kmeans in enumerate(self.kmeans_list):
+#             subvector = vector[i * subvector_length:(i + 1) * subvector_length]
+#             code = kmeans.predict([subvector])
+#             codes.append(code[0])
+
+#         return codes
+
+#     def decode(self, codes):
+#         subvector_length = self.centroids[0].shape[1]
+#         vector = np.zeros(subvector_length * self.n_subvectors)
+
+#         for i, code in enumerate(codes):
+#             centroid = self.centroids[i][code]
+#             vector[i * subvector_length:(i + 1) * subvector_length] = centroid
+
+#         return vector
+
 class VecDB:
-    def __init__(self, database_file_path = "saved_db.dat", index_file_path = "index.dat", new_db = True, db_size = None) -> None:
+    def __init__(self, database_file_path="saved_db.dat", index_file_path="index.dat", new_db=True, db_size=None) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
-        
-        record_size=struct.calcsize(f"I{70}f")
+
+        record_size = struct.calcsize(f"I{70}f")
         file_size = os.path.getsize(self.db_path)
         n_records = file_size // record_size
-        if(n_records==10*10**3):
-          n_probes=3
-        elif(n_records==100*10**3):
-          n_probes=10
-        elif(n_records==10**6):
-          n_probes=5
-        elif(n_records==5*10**6):
-          n_probes=15
-        elif(n_records==10*10**6):
-          n_probes=30
-        elif(n_records==15*10**6):
-          n_probes=256
-        elif(n_records==20*10**6):
-          n_probes=64
+
+        if n_records <= 10 ** 6:
+            n_probes = 5
+            self.number_of_clusters = 10
+        elif n_records <= 10 * 10 ** 6:
+            n_probes = 30
+            self.number_of_clusters = 200
+        elif n_records <= 15 * 10 ** 6:
+            n_probes = 256
+            self.number_of_clusters = 500
+        elif n_records <= 20 * 10 ** 6:
+            n_probes = 64
+            self.number_of_clusters = 8000
         else:
-          n_probes=3
+            n_probes = 3
+            self.number_of_clusters = 10
+
         self.n_probe = n_probes
-        if(n_records==10*10**3):           
-          self.number_of_clusters=10
-        elif(n_records==100*10**3):
-          self.number_of_clusters=50   
-        elif(n_records==10**6):
-          self.number_of_clusters=200
-        elif(n_records==5*10**6):
-          self.number_of_clusters=500
-        elif(n_records==10*10**6):
-          self.number_of_clusters=8000
-        else:
-          self.number_of_clusters=10
+
         self.n_clusters = self.number_of_clusters
         self.centroids = None
         self.index_files = []
+        # self.pq = ProductQuantizer(n_subvectors=4, n_clusters=256)
+
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -65,7 +94,7 @@ class VecDB:
             centroids_path = os.path.join(self.index_path, "centroids.bin")
             self.centroids = []
             predefined_length = DIMENSION  # Assuming the predefined length is the same as DIMENSION
-            
+
             with open(centroids_path, "rb") as f:
                 while True:
                     # Define the size of each centroid (adjust based on the number of floats per centroid)
@@ -76,15 +105,8 @@ class VecDB:
                         break
                     centroid = struct.unpack(f"{centroid_size}f", data)
                     self.centroids.append(centroid)
-    
+
     def _IVF_index(self, data, index_dir):
-        """
-        Build the IVF index by clustering data and storing cluster information in binary files.
-        
-        Args:
-            data (np.ndarray): Data vectors to index.
-            index_dir (str): Directory to store index files.
-        """
         if not os.path.exists(index_dir):
             os.makedirs(index_dir)
 
@@ -100,41 +122,24 @@ class VecDB:
             for centroid in self.centroids:
                 f.write(struct.pack(f"{len(centroid)}f", *centroid))
 
-        # Group vectors by cluster and save them
+        # Group vector IDs by cluster and save them
         cluster_files = [os.path.join(index_dir, f"cluster{i}.bin") for i in range(self.n_clusters)]
         cluster_data = {i: [] for i in range(self.n_clusters)}
 
         for i, label in enumerate(labels):
-            cluster_data[label].append(data[i])
+            cluster_data[label].append(data[i][0])  # Append only the vector ID
 
-        for cluster_id, vectors in cluster_data.items():
-            # with open(cluster_files[cluster_id], "wb") as f:
-            #     for vector in vectors:
-            #         f.write(struct.pack(f"{len(vector)}f", *vector))
+        for cluster_id, vector_ids in cluster_data.items():
             with open(cluster_files[cluster_id], "wb") as f:
-                for idx, vector in vectors:
-                    # Pack the index (4 bytes unsigned int) and then the vector (70 floats)
-                    f.write(struct.pack('I', idx))  # Write index as 4-byte unsigned int
-                    f.write(struct.pack(f"{len(vector)}f", *vector))        
-                    
+                for vector_id in vector_ids:
+                    f.write(struct.pack('I', vector_id))  # Write ID as 4-byte unsigned int
 
         self.index_files = cluster_files
         print("Indexing complete.")
-    
 
-    
+
+
     def _semantic_query_ivf(self, query_vector, top_k=5, index_dir=None):
-        """
-        Perform a semantic query using the IVF index.
-
-        Args:
-            query_vector (np.ndarray): Query vector.
-            top_k (int): Number of nearest neighbors to return.
-            index_dir (str): Directory containing index files.
-
-        Returns:
-            List[Tuple[int, float]]: List of (vector_index, similarity) tuples.
-        """
         query_vector = query_vector.squeeze()
         if index_dir is None or self.centroids is None:
             raise ValueError("Index must be built before querying.")
@@ -143,51 +148,48 @@ class VecDB:
         cluster_distances = np.linalg.norm(self.centroids - query_vector, axis=1)
         nearest_clusters = np.argsort(cluster_distances)[:self.n_probe]
 
-        candidates = []
+        # Use a heap to maintain top-k scores efficiently
+        top_scores_heap = []
+
         for cluster_id in nearest_clusters:
             cluster_path = os.path.join(index_dir, f"cluster{cluster_id}.bin")
             if not os.path.exists(cluster_path):
                 continue
 
-            
             with open(cluster_path, "rb") as f:
-            # Each chunk is: 4 bytes for ID + 70 * 4 bytes for vector
-                chunk_size = 4 + (70 * 4)
-                
                 while True:
-                    chunk = f.read(chunk_size)
+                    chunk = f.read(4)  # Only read the ID (4 bytes)
                     if not chunk:
                         break
-                    
-                    if len(chunk) < chunk_size:
-                        break  # Incomplete chunk, stop reading
-                    
-                    # Extract ID (first 4 bytes)
-                    id = struct.unpack('I', chunk[:4])[0]
-                    
-                    # Extract vector (next 70 * 4 bytes)
-                    vector = np.array(struct.unpack('70f', chunk[4:]))
-                    
-                    similarity = np.dot(query_vector, vector) / (
-                        np.linalg.norm(query_vector) * np.linalg.norm(vector)
-                    )
-                    
-                    candidates.append((id, similarity))
+
+                    vector_id = struct.unpack('I', chunk)[0]  # Parse the vector ID
+                    vector = self.get_one_row(vector_id)  # Fetch the vector from the database
+
+                    # Compute similarity
+                    similarity = self._cal_score(query_vector, vector)
+
+                    # Maintain top-k scores using a heap
+                    if len(top_scores_heap) < top_k:
+                        heapq.heappush(top_scores_heap, (similarity, vector_id))
+                    else:
+                        heapq.heappushpop(top_scores_heap, (similarity, vector_id))
 
         print("Selecting top-k candidates...")
-        # Return the IDs of the vectors with the biggest similarity
-        top_candidates = nlargest(top_k, candidates, key=lambda x: x[1])
-        top_candidates = [candidate[0] for candidate in top_candidates]
+        # Extract and sort the final top-k candidates
+        top_scores_heap.sort(reverse=True)  # Sort by similarity in descending order
+        top_candidates = [vector_id for _, vector_id in top_scores_heap]
+
         return top_candidates
-    
-    
+
+
+
+
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
         self._write_vectors_to_file(vectors)
-        vectors = [(idx,vector) for idx, vector in enumerate(vectors)]
+        vectors = [(idx, vector) for idx, vector in enumerate(vectors)]
         self._IVF_index(vectors, self.index_path)
-  #self._# build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
         mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='w+', shape=vectors.shape)
@@ -204,17 +206,16 @@ class VecDB:
         mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=full_shape)
         mmap_vectors[num_old_records:] = rows
         mmap_vectors.flush()
-        #TODO: might change to call insert in the index, if you need
-        self._# build_index()
+        # TODO: might change to call insert in the index, if you need
 
     def get_one_row(self, row_num: int) -> np.ndarray:
-        # This function is only load one row in memory
         try:
             offset = row_num * DIMENSION * ELEMENT_SIZE
             mmap_vector = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(1, DIMENSION), offset=offset)
             return np.array(mmap_vector[0])
         except Exception as e:
             return f"An error occurred: {e}"
+
 
     def get_all_rows(self) -> np.ndarray:
         # Take care this load all the data in memory
