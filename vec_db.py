@@ -1,6 +1,5 @@
-from typing import Dict, List, Annotated
+from typing import Annotated
 from sklearn.cluster import KMeans
-from heapq import nlargest
 import heapq
 import struct
 import numpy as np
@@ -9,42 +8,6 @@ import os
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-
-# class ProductQuantizer:
-#     def __init__(self, n_subvectors=2, n_clusters=256):
-#         self.n_subvectors = n_subvectors
-#         self.n_clusters = n_clusters
-#         self.kmeans_list = [KMeans(n_clusters=self.n_clusters, random_state=42) for _ in range(n_subvectors)]
-
-#     def fit(self, data):
-#         subvector_length = data.shape[1] // self.n_subvectors
-#         self.centroids = []
-
-#         for i, kmeans in enumerate(self.kmeans_list):
-#             subdata = data[:, i * subvector_length:(i + 1) * subvector_length]
-#             kmeans.fit(subdata)
-#             self.centroids.append(kmeans.cluster_centers_)
-
-#     def encode(self, vector):
-#         subvector_length = vector.shape[0] // self.n_subvectors
-#         codes = []
-
-#         for i, kmeans in enumerate(self.kmeans_list):
-#             subvector = vector[i * subvector_length:(i + 1) * subvector_length]
-#             code = kmeans.predict([subvector])
-#             codes.append(code[0])
-
-#         return codes
-
-#     def decode(self, codes):
-#         subvector_length = self.centroids[0].shape[1]
-#         vector = np.zeros(subvector_length * self.n_subvectors)
-
-#         for i, code in enumerate(codes):
-#             centroid = self.centroids[i][code]
-#             vector[i * subvector_length:(i + 1) * subvector_length] = centroid
-
-#         return vector
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index.dat", new_db=True, db_size=None) -> None:
@@ -57,26 +20,24 @@ class VecDB:
 
         if n_records <= 10 ** 6:
             n_probes = 5
-            self.number_of_clusters = 10
+            self.number_of_clusters = 150  # Increased the cluster size for faster indexing
         elif n_records <= 10 * 10 ** 6:
             n_probes = 30
-            self.number_of_clusters = 200
+            self.number_of_clusters = 1000
         elif n_records <= 15 * 10 ** 6:
             n_probes = 256
-            self.number_of_clusters = 500
+            self.number_of_clusters = 2000
         elif n_records <= 20 * 10 ** 6:
             n_probes = 64
-            self.number_of_clusters = 8000
+            self.number_of_clusters = 22000
         else:
             n_probes = 3
-            self.number_of_clusters = 10
+            self.number_of_clusters = 20
 
         self.n_probe = n_probes
-
         self.n_clusters = self.number_of_clusters
         self.centroids = None
         self.index_files = []
-        # self.pq = ProductQuantizer(n_subvectors=4, n_clusters=256)
 
         if new_db:
             if db_size is None:
@@ -90,20 +51,15 @@ class VecDB:
                 vectors = self.get_all_rows()
                 vectors = [(idx, vector) for idx, vector in enumerate(vectors)]
                 self._IVF_index(vectors, self.index_path)
-            # Load centroids from a file
             centroids_path = os.path.join(self.index_path, "centroids.bin")
             self.centroids = []
-            predefined_length = DIMENSION  # Assuming the predefined length is the same as DIMENSION
-
+            
             with open(centroids_path, "rb") as f:
                 while True:
-                    # Define the size of each centroid (adjust based on the number of floats per centroid)
-                    centroid_size = len(self.centroids[0]) if self.centroids else predefined_length
-                    bytes_to_read = centroid_size * struct.calcsize("f")
-                    data = f.read(bytes_to_read)
+                    data = f.read(DIMENSION * struct.calcsize("f"))
                     if not data:
                         break
-                    centroid = struct.unpack(f"{centroid_size}f", data)
+                    centroid = struct.unpack(f"{DIMENSION}f", data)
                     self.centroids.append(centroid)
 
     def _IVF_index(self, data, index_dir):
@@ -111,8 +67,8 @@ class VecDB:
             os.makedirs(index_dir)
 
         print("Running K-Means clustering...")
-        kmeans = KMeans(n_clusters=self.n_clusters, random_state=42)
-        vector_data = [vector[1] for vector in data]
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=42, n_init='auto')
+        vector_data = np.array([vector[1] for vector in data])
         labels = kmeans.fit_predict(vector_data)
         self.centroids = kmeans.cluster_centers_
 
@@ -122,22 +78,24 @@ class VecDB:
             for centroid in self.centroids:
                 f.write(struct.pack(f"{len(centroid)}f", *centroid))
 
-        # Group vector IDs by cluster and save them
-        cluster_files = [os.path.join(index_dir, f"cluster{i}.bin") for i in range(self.n_clusters)]
+        # Create in-memory cluster storage
         cluster_data = {i: [] for i in range(self.n_clusters)}
-
         for i, label in enumerate(labels):
-            cluster_data[label].append(data[i][0])  # Append only the vector ID
+            cluster_data[label].append(data[i][0])
 
+        # Save clusters to disk
+        print("Saving clusters to disk...")
         for cluster_id, vector_ids in cluster_data.items():
-            with open(cluster_files[cluster_id], "wb") as f:
-                for vector_id in vector_ids:
-                    f.write(struct.pack('I', vector_id))  # Write ID as 4-byte unsigned int
+            cluster_path = os.path.join(index_dir, f"cluster{cluster_id}.bin")
+            self._write_cluster_file(cluster_path, vector_ids)
 
-        self.index_files = cluster_files
+        self.index_files = [os.path.join(index_dir, f"cluster{i}.bin") for i in range(self.n_clusters)]
         print("Indexing complete.")
 
-
+    def _write_cluster_file(self, file_path, vector_ids):
+        with open(file_path, "wb") as f:
+            for vector_id in vector_ids:
+                f.write(struct.pack('I', vector_id))  # Write ID as 4-byte unsigned int
 
     def _semantic_query_ivf(self, query_vector, top_k=5, index_dir=None):
         query_vector = query_vector.squeeze()
@@ -148,9 +106,7 @@ class VecDB:
         cluster_distances = np.linalg.norm(self.centroids - query_vector, axis=1)
         nearest_clusters = np.argsort(cluster_distances)[:self.n_probe]
 
-        # Use a heap to maintain top-k scores efficiently
         top_scores_heap = []
-
         for cluster_id in nearest_clusters:
             cluster_path = os.path.join(index_dir, f"cluster{cluster_id}.bin")
             if not os.path.exists(cluster_path):
@@ -165,24 +121,18 @@ class VecDB:
                     vector_id = struct.unpack('I', chunk)[0]  # Parse the vector ID
                     vector = self.get_one_row(vector_id)  # Fetch the vector from the database
 
-                    # Compute similarity
                     similarity = self._cal_score(query_vector, vector)
 
-                    # Maintain top-k scores using a heap
                     if len(top_scores_heap) < top_k:
                         heapq.heappush(top_scores_heap, (similarity, vector_id))
                     else:
                         heapq.heappushpop(top_scores_heap, (similarity, vector_id))
 
         print("Selecting top-k candidates...")
-        # Extract and sort the final top-k candidates
         top_scores_heap.sort(reverse=True)  # Sort by similarity in descending order
         top_candidates = [vector_id for _, vector_id in top_scores_heap]
 
         return top_candidates
-
-
-
 
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
@@ -206,7 +156,6 @@ class VecDB:
         mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=full_shape)
         mmap_vectors[num_old_records:] = rows
         mmap_vectors.flush()
-        # TODO: might change to call insert in the index, if you need
 
     def get_one_row(self, row_num: int) -> np.ndarray:
         try:
@@ -216,26 +165,18 @@ class VecDB:
         except Exception as e:
             return f"An error occurred: {e}"
 
-
     def get_all_rows(self) -> np.ndarray:
-        # Take care this load all the data in memory
         num_records = self._get_num_records()
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         return np.array(vectors)
-    
-    def retrieve(self, query, top_k = 5):
-    
-        results = np.array(self._semantic_query_ivf(query, top_k=top_k, index_dir=self.index_path))  
+
+    def retrieve(self, query, top_k=5):
+        results = np.array(self._semantic_query_ivf(query, top_k=top_k, index_dir=self.index_path))
         return results
+
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
         norm_vec2 = np.linalg.norm(vec2)
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
-
-    # def _build_index(self):
-    #     # Placeholder for index building logic
-    #     pass
-
-
