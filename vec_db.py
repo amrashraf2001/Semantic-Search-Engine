@@ -109,7 +109,7 @@ class VecDB:
         Build the index by performing k-means clustering and saving centroids and inverted indices.
         """
         total_records = self._get_num_records()
-        sample_size = min(total_records, 1_000_000)
+        sample_size = min(total_records, 10_000_000)
         sample_data = read_binary_file_chunk(self.db_path, 0, sample_size)
         vector_data = np.array([v[1] for v in sample_data], dtype=np.float32)
 
