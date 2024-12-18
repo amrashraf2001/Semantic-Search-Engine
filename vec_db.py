@@ -7,7 +7,6 @@ DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
 
-
 def read_binary_file_chunk(file_path, start_index, chunk_size):
     """
     Read a chunk of (id, vector) records from the main DB file.
@@ -28,7 +27,6 @@ def read_binary_file_chunk(file_path, start_index, chunk_size):
             data.append((vec_id, vector))
     return data
 
-
 def perform_kmeans(vectors, n_clusters):
     """
     Perform k-means clustering using faiss's KMeans implementation.
@@ -41,7 +39,6 @@ def perform_kmeans(vectors, n_clusters):
     # Assign each vector to a cluster
     _, labels = kmeans.index.search(vectors, 1)  # Search returns distances and labels
     return centroids, labels.flatten()
-
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index_dir", new_db=True, db_size=None):
@@ -87,13 +84,10 @@ class VecDB:
             self.load_index()
 
     def generate_database(self, size: int) -> None:
-        """
-        Generate a database of random normalized vectors.
-        """
         rng = np.random.default_rng(DB_SEED_NUMBER)
-        vectors = rng.random((size, self.DIMENSION), dtype=np.float32)
-        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10
+        vectors = rng.random((size, DIMENSION), dtype=np.float32)
         self._write_vectors_to_file(vectors)
+        self.build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
         """
@@ -116,7 +110,7 @@ class VecDB:
         print("Performing k-means clustering...")
         centroids, labels = perform_kmeans(vector_data, self.nlist)
 
-        # Build an inverted index
+        # Build an inverted index with only IDs
         self.inverted_index = {i: [] for i in range(self.nlist)}
         for idx, cluster_id in enumerate(labels):
             self.inverted_index[cluster_id].append(sample_data[idx][0])
@@ -148,7 +142,6 @@ class VecDB:
             self.load_index()
 
         query_vector = np.array(query_vector, dtype=np.float32).reshape(1, -1)
-        query_vector /= np.linalg.norm(query_vector) + 1e-10
 
         # Find the nearest centroid
         distances = np.linalg.norm(self.centroids - query_vector, axis=1)
@@ -160,10 +153,10 @@ class VecDB:
         # Load vectors for these IDs and compute exact distances
         candidates = [self.get_one_row(id_) for id_ in candidate_ids]
         candidates = np.array(candidates, dtype=np.float32)
-        exact_distances = np.dot(candidates, query_vector.T).flatten()
+        exact_distances = np.linalg.norm(candidates - query_vector, axis=1)
 
         # Get the top_k results
-        top_k_indices = np.argsort(-exact_distances)[:top_k]
+        top_k_indices = np.argsort(exact_distances)[:top_k]
         top_k_ids = [candidate_ids[i] for i in top_k_indices]
         return top_k_ids
 
@@ -172,7 +165,6 @@ class VecDB:
         Insert new vectors into the database and rebuild the index.
         """
         rows = np.array(rows, dtype=np.float32)
-        rows /= np.linalg.norm(rows, axis=1, keepdims=True) + 1e-10
 
         num_old_records = self._get_num_records()
         record_format = f"I{self.DIMENSION}f"
