@@ -84,7 +84,7 @@ class VecDB:
             raise ValueError("No records found in database")
 
         # Read vectors in chunks for clustering
-        chunk_size = min(total_records, 1_000_000)
+        chunk_size = min(total_records, 5_000_000)
         vectors = np.zeros((chunk_size, DIMENSION), dtype=np.float32)
         ids = np.zeros(chunk_size, dtype=np.int32)
 
