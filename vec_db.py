@@ -2,7 +2,6 @@ import struct
 import numpy as np
 import os
 import faiss
-from collections import defaultdict
 import mmap
 
 DB_SEED_NUMBER = 42
@@ -54,7 +53,7 @@ class VecDB:
     def _init_data_access(self):
         if not hasattr(self, 'data'):
             self.data = np.memmap(self.db_path, dtype=np.float32, mode='r', 
-                                shape=(self.n_records, self.DIMENSION))
+                                  shape=(self.n_records, self.DIMENSION))
 
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
@@ -84,8 +83,10 @@ class VecDB:
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
         
-        # Build cluster index (storing only IDs)
-        self.cluster_index = defaultdict(list)
+        # Build labels array to store cluster assignments
+        labels_path = os.path.join(self.index_file_path, "labels.memmap")
+        labels_memmap = np.memmap(labels_path, dtype='int32', mode='w+', shape=(self.n_records,))
+        
         batch_size = 100_000
         
         for start in range(0, self.n_records, batch_size):
@@ -98,26 +99,27 @@ class VecDB:
             
             # Compute cosine similarities to centroids
             similarities = normalized_batch.dot(kmeans.centroids.T)
-            labels = np.argmax(similarities, axis=1)
+            labels = np.argmax(similarities, axis=1).astype('int32')
             
-            # Store only IDs
-            for idx, label in enumerate(labels):
-                self.cluster_index[int(label)].append(start + idx)
+            # Store labels in memmap
+            labels_memmap[start:end] = labels
+        
+        labels_memmap.flush()
+        del labels_memmap  # Close the memmap
 
-        # Save index
+        # Save centroids
         np.save(os.path.join(self.index_file_path, "centroids.npy"), kmeans.centroids)
-        np.save(os.path.join(self.index_file_path, "cluster_index.npy"), dict(self.cluster_index))
         print(f"Index saved to {self.index_file_path}")
 
     def load_index(self):
         centroids_path = os.path.join(self.index_file_path, "centroids.npy")
-        cluster_index_path = os.path.join(self.index_file_path, "cluster_index.npy")
+        labels_path = os.path.join(self.index_file_path, "labels.memmap")
 
-        if not all(os.path.exists(p) for p in [centroids_path, cluster_index_path]):
+        if not all(os.path.exists(p) for p in [centroids_path, labels_path]):
             raise FileNotFoundError("Index files not found. Please build the index first.")
 
         self.centroids = np.load(centroids_path)
-        self.cluster_index = defaultdict(list, np.load(cluster_index_path, allow_pickle=True).item())
+        self.labels = np.memmap(labels_path, dtype='int32', mode='r', shape=(self.n_records,))
         self._init_data_access()
         print(f"Index loaded from {self.index_file_path}")
 
@@ -134,11 +136,22 @@ class VecDB:
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
-        # Get candidate IDs
+        # Collect candidate IDs by scanning labels in chunks
         candidate_ids = []
+        labels_chunk_size = 10_000_000  # Adjust this based on available memory
         for cluster_id in nearest_clusters:
-            candidate_ids.extend(self.cluster_index[cluster_id])
-
+            cluster_candidate_ids = []
+            for start in range(0, self.n_records, labels_chunk_size):
+                end = min(start + labels_chunk_size, self.n_records)
+                labels_chunk = self.labels[start:end]
+                indices = np.where(labels_chunk == cluster_id)[0] + start
+                cluster_candidate_ids.extend(indices.tolist())
+                # Limit the number of candidates per cluster to avoid excessive RAM usage
+                if len(cluster_candidate_ids) >= 100_000:  # Adjust this threshold as needed
+                    break
+            candidate_ids.extend(cluster_candidate_ids)
+        
+        # If not enough candidates, return default indices
         if len(candidate_ids) < top_k:
             return list(range(min(top_k, self.n_records)))
 
@@ -146,7 +159,7 @@ class VecDB:
         candidate_ids = np.array(candidate_ids)
         candidate_vectors = self.data[candidate_ids]
         
-        # Compute cosine similarities exactly as in the test code
+        # Compute cosine similarities
         candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
         similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
         
