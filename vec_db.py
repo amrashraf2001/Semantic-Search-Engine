@@ -1,12 +1,12 @@
-%pip install faiss-cpu
-import faiss
 import struct
 import numpy as np
 import os
+import faiss
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
+
 
 def read_binary_file_chunk(file_path, start_index, chunk_size):
     """
@@ -28,11 +28,25 @@ def read_binary_file_chunk(file_path, start_index, chunk_size):
             data.append((vec_id, vector))
     return data
 
+
+def perform_kmeans(vectors, n_clusters):
+    """
+    Perform k-means clustering using faiss's KMeans implementation.
+    Returns the centroids and the cluster assignments.
+    """
+    kmeans = faiss.Kmeans(DIMENSION, n_clusters, niter=20, verbose=True, seed=DB_SEED_NUMBER)
+    kmeans.train(vectors)
+    centroids = kmeans.centroids
+
+    # Assign each vector to a cluster
+    _, labels = kmeans.index.search(vectors, 1)  # Search returns distances and labels
+    return centroids, labels.flatten()
+
+
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index_dir", new_db=True, db_size=None):
         self.db_path = database_file_path
         self.index_file_path = index_file_path
-
         self.DIMENSION = DIMENSION
 
         # Determine number of records
@@ -40,32 +54,22 @@ class VecDB:
         file_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         n_records = file_size // record_size
 
-        # Dynamically determine the number of probes and clusters
-        # Adjust these parameters as needed
+        # Dynamically determine the number of clusters
         if n_records <= 10 ** 6:
-            self.nlist = 100  # Number of clusters
+            self.nlist = 100
             self.n_probe = 10
-            self.m = 14  # Number of subquantizers, adjusted to divide DIMENSION=70
         elif n_records <= 10 * 10 ** 6:
             self.nlist = 500
             self.n_probe = 50
-            self.m = 35
         elif n_records <= 15 * 10 ** 6:
             self.nlist = 2000
             self.n_probe = 100
-            self.m = 14
         elif n_records <= 20 * 10 ** 6:
             self.nlist = 5000
             self.n_probe = 200
-            self.m = 14
         else:
             self.nlist = 10000
             self.n_probe = 500
-            self.m = 14
-
-        # Ensure DIMENSION is divisible by m
-        if self.DIMENSION % self.m != 0:
-            raise ValueError(f"DIMENSION {self.DIMENSION} must be divisible by number of subquantizers m={self.m}")
 
         if new_db:
             if db_size is None:
@@ -83,74 +87,90 @@ class VecDB:
             self.load_index()
 
     def generate_database(self, size: int) -> None:
+        """
+        Generate a database of random normalized vectors.
+        """
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, self.DIMENSION), dtype=np.float32)
-        # Normalize vectors for cosine similarity
         vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10
         self._write_vectors_to_file(vectors)
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
-        # Write ID + vector to the main DB file
+        """
+        Write vectors to the binary database file.
+        """
         record_format = f"I{self.DIMENSION}f"
         with open(self.db_path, "wb") as f:
             for i, v in enumerate(vectors):
                 f.write(struct.pack(record_format, i, *v))
 
     def build_index(self):
-        # Read sample data for training
+        """
+        Build the index by performing k-means clustering and saving centroids and inverted indices.
+        """
         total_records = self._get_num_records()
-        sample_size = min(total_records, 100_000)
+        sample_size = min(total_records, 1_000_000)
         sample_data = read_binary_file_chunk(self.db_path, 0, sample_size)
         vector_data = np.array([v[1] for v in sample_data], dtype=np.float32)
 
-        # Build the index with IndexIVFPQ
-        quantizer = faiss.IndexFlatIP(self.DIMENSION)  # Inner product for cosine similarity
-        index = faiss.IndexIVFPQ(quantizer, self.DIMENSION, self.nlist, self.m, 8)  # 8 bits per code
+        print("Performing k-means clustering...")
+        centroids, labels = perform_kmeans(vector_data, self.nlist)
 
-        # Train the index
-        print("Training IndexIVFPQ...")
-        index.train(vector_data)
+        # Build an inverted index
+        self.inverted_index = {i: [] for i in range(self.nlist)}
+        for idx, cluster_id in enumerate(labels):
+            self.inverted_index[cluster_id].append(sample_data[idx][0])
 
-        # Add vectors to the index in chunks to save memory
-        print("Adding vectors to the index...")
-        chunk_size = 100_000
-        for start in range(0, total_records, chunk_size):
-            end = min(start + chunk_size, total_records)
-            chunk_data = read_binary_file_chunk(self.db_path, start, end - start)
-            vectors = np.array([v[1] for v in chunk_data], dtype=np.float32)
-            ids = np.array([v[0] for v in chunk_data], dtype=np.int64)  # IDs must be int64
-            index.add_with_ids(vectors, ids)
-
-        # Save the index to disk
-        index_path = os.path.join(self.index_file_path, "index_ivfpq.faiss")
-        faiss.write_index(index, index_path)
-        print(f"Index saved to {index_path}")
+        # Save centroids and inverted index to disk
+        np.save(os.path.join(self.index_file_path, "centroids.npy"), centroids)
+        np.save(os.path.join(self.index_file_path, "inverted_index.npy"), self.inverted_index)
+        print(f"Index saved to {self.index_file_path}")
 
     def load_index(self):
-        index_path = os.path.join(self.index_file_path, "index_ivfpq.faiss")
-        if not os.path.exists(index_path):
-            raise FileNotFoundError("Index file not found. Please build the index first.")
-        self.index = faiss.read_index(index_path)
-        print(f"Index loaded from {index_path}")
-        self.index.nprobe = self.n_probe  # Set nprobe for search
+        """
+        Load the index from disk.
+        """
+        centroids_path = os.path.join(self.index_file_path, "centroids.npy")
+        inverted_index_path = os.path.join(self.index_file_path, "inverted_index.npy")
+
+        if not os.path.exists(centroids_path) or not os.path.exists(inverted_index_path):
+            raise FileNotFoundError("Index files not found. Please build the index first.")
+
+        self.centroids = np.load(centroids_path)
+        self.inverted_index = np.load(inverted_index_path, allow_pickle=True).item()
+        print(f"Index loaded from {self.index_file_path}")
 
     def retrieve(self, query_vector, top_k=5):
-        if not hasattr(self, 'index'):
+        """
+        Retrieve the top_k closest vectors to the query vector.
+        """
+        if not hasattr(self, 'centroids') or not hasattr(self, 'inverted_index'):
             self.load_index()
 
-        # Normalize query vector for cosine similarity
         query_vector = np.array(query_vector, dtype=np.float32).reshape(1, -1)
         query_vector /= np.linalg.norm(query_vector) + 1e-10
 
-        # Perform the search
-        scores, indices = self.index.search(query_vector, top_k)
+        # Find the nearest centroid
+        distances = np.linalg.norm(self.centroids - query_vector, axis=1)
+        nearest_centroid = np.argmin(distances)
 
-        # Retrieve the top_k IDs
-        ids = indices[0]
-        return ids.tolist()
+        # Retrieve IDs from the nearest centroid's cluster
+        candidate_ids = self.inverted_index.get(nearest_centroid, [])
+
+        # Load vectors for these IDs and compute exact distances
+        candidates = [self.get_one_row(id_) for id_ in candidate_ids]
+        candidates = np.array(candidates, dtype=np.float32)
+        exact_distances = np.dot(candidates, query_vector.T).flatten()
+
+        # Get the top_k results
+        top_k_indices = np.argsort(-exact_distances)[:top_k]
+        top_k_ids = [candidate_ids[i] for i in top_k_indices]
+        return top_k_ids
 
     def insert_records(self, rows: np.ndarray):
-        # Normalize vectors
+        """
+        Insert new vectors into the database and rebuild the index.
+        """
         rows = np.array(rows, dtype=np.float32)
         rows /= np.linalg.norm(rows, axis=1, keepdims=True) + 1e-10
 
@@ -160,12 +180,7 @@ class VecDB:
             for i, v in enumerate(rows, start=num_old_records):
                 f.write(struct.pack(record_format, i, *v))
 
-        # Add new vectors to the index
-        self.load_index()  # Ensure index is loaded
-        vectors = rows.astype(np.float32)
-        ids = np.arange(num_old_records, num_old_records + len(rows), dtype=np.int64)
-        self.index.add_with_ids(vectors, ids)
-        # Optionally re-train or re-build the index if necessary
+        self.build_index()
 
     def get_one_row(self, row_num: int) -> np.ndarray:
         record_format = f"I{self.DIMENSION}f"
