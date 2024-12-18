@@ -185,8 +185,8 @@ class VecDB:
         with open(self.db_path, "rb") as f:
             f.seek(offset)
             data = f.read(record_size)
-            if len(data) != record_size:
-                raise IndexError(f"Could not read vector at row {row_num}.")
+            # if len(data) != record_size:
+            #     raise IndexError(f"Could not read vector at row {row_num}.")
             unpacked = struct.unpack(record_format, data)
             vector = np.array(unpacked[1:], dtype=np.float32)
             return vector
@@ -199,8 +199,8 @@ class VecDB:
         with open(self.db_path, "rb") as f:
             for i in range(num_records):
                 data = f.read(record_size)
-                if not data or len(data) != record_size:
-                    raise IndexError(f"Could not read vector at row {i}.")
+                # if not data or len(data) != record_size:
+                #     raise IndexError(f"Could not read vector at row {i}.")
                 unpacked = struct.unpack(record_format, data)
                 vectors[i] = unpacked[1:]
         return vectors
