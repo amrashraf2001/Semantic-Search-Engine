@@ -29,10 +29,13 @@ def read_binary_file_chunk(file_path, start_index, chunk_size):
 def perform_kmeans(vectors, n_clusters):
     kmeans = faiss.Kmeans(DIMENSION, n_clusters, niter=20, verbose=True, seed=DB_SEED_NUMBER)
     kmeans.train(vectors)
+    
+    # Compute cluster assignments
     distances = np.zeros((len(vectors), n_clusters), dtype=np.float32)
     for i in range(n_clusters):
         distances[:, i] = np.linalg.norm(vectors - kmeans.centroids[i], axis=1)
     labels = np.argmin(distances, axis=1)
+    
     return kmeans.centroids, labels
 
 class VecDB:
@@ -88,34 +91,39 @@ class VecDB:
         if total_records == 0:
             raise ValueError("No records found in database")
 
-        sample_size = min(total_records, 1_000_000)  # Reduced sample size
+        sample_size = min(total_records, 5_000_000)
         sample_data = read_binary_file_chunk(self.db_path, 0, sample_size)
         vector_data = np.array([v[1] for v in sample_data], dtype=np.float32)
         
         print("Performing clustering...")
         centroids, labels = perform_kmeans(vector_data, self.nlist)
         
-        # Build optimized inverted index
-        self.inverted_index = defaultdict(list)
-        for idx, label in enumerate(labels):
-            vec_id = sample_data[idx][0]
-            vector = vector_data[idx]
-            self.inverted_index[label].append((vec_id, vector))
+        # Build inverted index
+        self.cluster_index = defaultdict(list)
+        self.vector_data = {}
+        
+        for idx, (vec_id, vector) in enumerate(sample_data):
+            cluster_id = labels[idx]
+            self.cluster_index[cluster_id].append(vec_id)
+            self.vector_data[vec_id] = vector
 
         # Save index
         np.save(os.path.join(self.index_file_path, "centroids.npy"), centroids)
-        np.save(os.path.join(self.index_file_path, "inverted_index.npy"), dict(self.inverted_index))
+        np.save(os.path.join(self.index_file_path, "cluster_index.npy"), dict(self.cluster_index))
+        np.save(os.path.join(self.index_file_path, "vector_data.npy"), self.vector_data)
         print(f"Index saved to {self.index_file_path}")
 
     def load_index(self):
         centroids_path = os.path.join(self.index_file_path, "centroids.npy")
-        inverted_index_path = os.path.join(self.index_file_path, "inverted_index.npy")
+        cluster_index_path = os.path.join(self.index_file_path, "cluster_index.npy")
+        vector_data_path = os.path.join(self.index_file_path, "vector_data.npy")
 
-        if not all(os.path.exists(p) for p in [centroids_path, inverted_index_path]):
+        if not all(os.path.exists(p) for p in [centroids_path, cluster_index_path, vector_data_path]):
             raise FileNotFoundError("Index files not found. Please build the index first.")
 
         self.centroids = np.load(centroids_path)
-        self.inverted_index = defaultdict(list, np.load(inverted_index_path, allow_pickle=True).item())
+        self.cluster_index = defaultdict(list, np.load(cluster_index_path, allow_pickle=True).item())
+        self.vector_data = np.load(vector_data_path, allow_pickle=True).item()
         print(f"Index loaded from {self.index_file_path}")
 
     def retrieve(self, query_vector, top_k=5):
@@ -124,20 +132,20 @@ class VecDB:
 
         query_vector = np.array(query_vector, dtype=np.float32)
         
-        # Find nearest clusters efficiently
+        # Find nearest clusters
         centroid_distances = np.linalg.norm(self.centroids - query_vector, axis=1)
         nearest_clusters = np.argpartition(centroid_distances, self.n_probe)[:self.n_probe]
 
-        # Fast candidate collection
-        candidates = []
+        # Collect candidates
+        candidate_ids = []
         for cluster_id in nearest_clusters:
-            candidates.extend(self.inverted_index[cluster_id])
+            candidate_ids.extend(self.cluster_index[cluster_id])
 
-        if not candidates:
+        if not candidate_ids:
             return []
 
-        # Batch compute distances
-        candidate_vectors = np.array([v[1] for v in candidates], dtype=np.float32)
+        # Compute distances efficiently
+        candidate_vectors = np.array([self.vector_data[idx] for idx in candidate_ids], dtype=np.float32)
         distances = np.linalg.norm(candidate_vectors - query_vector, axis=1)
         
         # Get top-k efficiently
@@ -147,7 +155,7 @@ class VecDB:
             indices = np.argpartition(distances, top_k)[:top_k]
             indices = indices[np.argsort(distances[indices])]
 
-        return [candidates[i][0] for i in indices]
+        return [candidate_ids[i] for i in indices]
 
     def insert_records(self, rows: np.ndarray):
         num_old_records = self._get_num_records()
@@ -158,7 +166,7 @@ class VecDB:
                 record = struct.pack(self.record_format, i, *vector)
                 f.write(record)
 
-        # Fast cluster assignment
+        # Assign to clusters
         distances = np.zeros((len(rows), len(self.centroids)), dtype=np.float32)
         for i, centroid in enumerate(self.centroids):
             distances[:, i] = np.linalg.norm(rows - centroid, axis=1)
@@ -168,10 +176,12 @@ class VecDB:
         # Update index
         for i, (label, vector) in enumerate(zip(labels, rows)):
             vec_id = num_old_records + i
-            self.inverted_index[label].append((vec_id, vector))
+            self.cluster_index[label].append(vec_id)
+            self.vector_data[vec_id] = vector
 
         # Save updated index
-        np.save(os.path.join(self.index_file_path, "inverted_index.npy"), dict(self.inverted_index))
+        np.save(os.path.join(self.index_file_path, "cluster_index.npy"), dict(self.cluster_index))
+        np.save(os.path.join(self.index_file_path, "vector_data.npy"), self.vector_data)
 
     def get_one_row(self, row_num: int) -> np.ndarray:
         max_records = self._get_num_records()
