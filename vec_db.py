@@ -86,6 +86,7 @@ class VecDB:
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
+        print(len(vectors))
         self._write_vectors_to_file(vectors)
         self.build_index()
 
@@ -178,8 +179,8 @@ class VecDB:
         record_format = f"I{self.DIMENSION}f"
         record_size = struct.calcsize(record_format)
         max_records = self._get_num_records()
-        if row_num < 0 or row_num >= max_records:
-            raise IndexError(f"Row number {row_num} is out of range.")
+        # if row_num < 0 or row_num >= max_records:
+        #     raise IndexError(f"Row number {row_num} is out of range.")
         offset = row_num * record_size
         with open(self.db_path, "rb") as f:
             f.seek(offset)
