@@ -12,17 +12,18 @@ def read_binary_file_chunk(file_path, start_index, chunk_size):
     Read a chunk of (id, vector) records from the main DB file.
     Returns a list of tuples (id, vector).
     """
-    record_format = f"I{DIMENSION}f"
+    record_format = 'If' + 'f' * (DIMENSION - 1)  # Format: id (uint32) + DIMENSION float32s
     record_size = struct.calcsize(record_format)
     data = []
+    
     with open(file_path, "rb") as f:
         f.seek(start_index * record_size)
         for _ in range(chunk_size):
             record_bytes = f.read(record_size)
-            if not record_bytes:
+            if not record_bytes or len(record_bytes) != record_size:
                 break
             unpacked = struct.unpack(record_format, record_bytes)
-            vec_id = unpacked[0]
+            vec_id = int(unpacked[0])
             vector = np.array(unpacked[1:], dtype=np.float32)
             data.append((vec_id, vector))
     return data
@@ -37,7 +38,7 @@ def perform_kmeans(vectors, n_clusters):
     centroids = kmeans.centroids
 
     # Assign each vector to a cluster
-    _, labels = kmeans.index.search(vectors, 1)  # Search returns distances and labels
+    _, labels = kmeans.index.search(vectors, 1)
     return centroids, labels.flatten()
 
 class VecDB:
@@ -45,11 +46,12 @@ class VecDB:
         self.db_path = database_file_path
         self.index_file_path = index_file_path
         self.DIMENSION = DIMENSION
+        self.record_format = 'If' + 'f' * (DIMENSION - 1)  # Format: id (uint32) + DIMENSION float32s
+        self.record_size = struct.calcsize(self.record_format)
 
         # Determine number of records
-        record_size = (self.DIMENSION + 1) * ELEMENT_SIZE
         file_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
-        n_records = file_size // record_size
+        n_records = file_size // self.record_size
 
         # Dynamically determine the number of clusters
         if n_records <= 10 ** 6:
@@ -86,18 +88,16 @@ class VecDB:
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
-        print(len(vectors))
         self._write_vectors_to_file(vectors)
-        self.build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
         """
         Write vectors to the binary database file.
         """
-        record_format = f"I{self.DIMENSION}f"
         with open(self.db_path, "wb") as f:
-            for i, v in enumerate(vectors):
-                f.write(struct.pack(record_format, i, *v))
+            for i, vector in enumerate(vectors):
+                record = struct.pack(self.record_format, i, *vector)
+                f.write(record)
 
     def build_index(self):
         """
@@ -151,6 +151,9 @@ class VecDB:
         # Retrieve IDs from the nearest centroid's cluster
         candidate_ids = self.inverted_index.get(nearest_centroid, [])
 
+        if not candidate_ids:
+            return []
+
         # Load vectors for these IDs and compute exact distances
         candidates = [self.get_one_row(id_) for id_ in candidate_ids]
         candidates = np.array(candidates, dtype=np.float32)
@@ -165,46 +168,40 @@ class VecDB:
         """
         Insert new vectors into the database and rebuild the index.
         """
-        rows = np.array(rows, dtype=np.float32)
-
         num_old_records = self._get_num_records()
-        record_format = f"I{self.DIMENSION}f"
         with open(self.db_path, "ab") as f:
-            for i, v in enumerate(rows, start=num_old_records):
-                f.write(struct.pack(record_format, i, *v))
-
+            for i, vector in enumerate(rows, start=num_old_records):
+                record = struct.pack(self.record_format, i, *vector)
+                f.write(record)
         self.build_index()
 
     def get_one_row(self, row_num: int) -> np.ndarray:
-        record_format = f"I{self.DIMENSION}f"
-        record_size = struct.calcsize(record_format)
         max_records = self._get_num_records()
-        # if row_num < 0 or row_num >= max_records:
-        #     raise IndexError(f"Row number {row_num} is out of range.")
-        offset = row_num * record_size
+        if row_num < 0 or row_num >= max_records:
+            raise IndexError(f"Row number {row_num} is out of range.")
+            
         with open(self.db_path, "rb") as f:
-            f.seek(offset)
-            data = f.read(record_size)
-            # if len(data) != record_size:
-            #     raise IndexError(f"Could not read vector at row {row_num}.")
-            unpacked = struct.unpack(record_format, data)
-            vector = np.array(unpacked[1:], dtype=np.float32)
-            return vector
+            f.seek(row_num * self.record_size)
+            data = f.read(self.record_size)
+            if len(data) != self.record_size:
+                raise IndexError(f"Could not read vector at row {row_num}.")
+            unpacked = struct.unpack(self.record_format, data)
+            return np.array(unpacked[1:], dtype=np.float32)
 
     def get_all_rows(self) -> np.ndarray:
         num_records = self._get_num_records()
-        record_format = f"I{self.DIMENSION}f"
-        record_size = struct.calcsize(record_format)
         vectors = np.empty((num_records, self.DIMENSION), dtype=np.float32)
+        
         with open(self.db_path, "rb") as f:
             for i in range(num_records):
-                data = f.read(record_size)
-                # if not data or len(data) != record_size:
-                #     raise IndexError(f"Could not read vector at row {i}.")
-                unpacked = struct.unpack(record_format, data)
+                data = f.read(self.record_size)
+                if not data or len(data) != self.record_size:
+                    raise IndexError(f"Could not read vector at row {i}.")
+                unpacked = struct.unpack(self.record_format, data)
                 vectors[i] = unpacked[1:]
         return vectors
 
     def _get_num_records(self) -> int:
-        record_size = (self.DIMENSION + 1) * ELEMENT_SIZE
-        return os.path.getsize(self.db_path) // record_size
+        if not os.path.exists(self.db_path):
+            return 0
+        return os.path.getsize(self.db_path) // self.record_size
