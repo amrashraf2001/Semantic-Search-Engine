@@ -5,7 +5,7 @@ import faiss
 import gc
 from typing import List
 import heapq
-from memory_profiler import memory_usage
+import time
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -73,9 +73,9 @@ class VecDB:
         sample_size = min(self.n_records, 1_000_000)
         batch_size = 100_000
 
-        vectors = self.data[:sample_size].copy()
-        vector_norms = np.linalg.norm(vectors, axis=1)
-        normalized_vectors = vectors / vector_norms[:, np.newaxis]
+        vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[:sample_size]
+        vector_norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        normalized_vectors = vectors / vector_norms
 
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
@@ -87,10 +87,10 @@ class VecDB:
 
         for start in range(0, self.n_records, batch_size):
             end = min(start + batch_size, self.n_records)
-            batch_vectors = self.data[start:end]
+            batch_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[start:end]
 
-            batch_norms = np.linalg.norm(batch_vectors, axis=1)
-            normalized_batch = batch_vectors / batch_norms[:, np.newaxis]
+            batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
+            normalized_batch = batch_vectors / batch_norms
 
             similarities = normalized_batch.dot(kmeans.centroids.T)
             labels = np.argmax(similarities, axis=1).astype('int32')
@@ -151,18 +151,14 @@ class VecDB:
             return list(range(min(top_k, self.n_records)))
 
         candidate_ids = np.array(candidate_ids)
-        batch_size = 10000
+
         similarities = []
         candidate_ids_list = []
-
-        for start in range(0, len(candidate_ids), batch_size):
-            end = min(start + batch_size, len(candidate_ids))
-            batch_candidate_ids = candidate_ids[start:end]
-            batch_candidate_vectors = self.data[batch_candidate_ids]
-            batch_candidate_norms = np.linalg.norm(batch_candidate_vectors, axis=1)
-            batch_similarities = batch_candidate_vectors.dot(query_vector) / (batch_candidate_norms * query_norm)
-            similarities.extend(batch_similarities.tolist())
-            candidate_ids_list.extend(batch_candidate_ids.tolist())
+        for candidate_id in candidate_ids:
+            candidate_vector = self.data[candidate_id]
+            similarity = candidate_vector.dot(query_vector) / (np.linalg.norm(candidate_vector) * query_norm)
+            similarities.append(similarity)
+            candidate_ids_list.append(candidate_id)
 
         similarities = np.array(similarities)
         candidate_ids = np.array(candidate_ids_list)
@@ -188,9 +184,8 @@ class VecDB:
 
     def _get_num_records(self) -> int:
         return self.n_records
-    
+
     def __del__(self):
         if hasattr(self, 'data'):
             del self.data
         gc.collect()
-
