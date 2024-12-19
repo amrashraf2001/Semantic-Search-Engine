@@ -2,6 +2,10 @@ import struct
 import numpy as np
 import os
 import faiss
+import gc
+from typing import List
+import heapq
+import time
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -145,8 +149,11 @@ class VecDB:
         candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
         similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
         
-        top_indices = np.argpartition(similarities, -top_k)[-top_k:]
-        top_indices = top_indices[np.argsort(-similarities[top_indices])]
+        # Use heapq to find the top_k indices
+        if top_k < len(similarities):
+            top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
+        else:
+            top_indices = np.argsort(-similarities)[:top_k]
         
         return candidate_ids[top_indices].tolist()
 
@@ -168,3 +175,4 @@ class VecDB:
     def __del__(self):
         if hasattr(self, 'data'):
             del self.data
+        gc.collect()
