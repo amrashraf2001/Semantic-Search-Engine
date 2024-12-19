@@ -44,7 +44,7 @@ class VecDB:
             self.nlist = 32
             self.n_probe = 4
         elif self.n_records <= 10 * 10 ** 6:
-            self.nlist = 1000
+            self.nlist = 32
             self.n_probe = 6
         else:
             self.nlist = 128
@@ -71,7 +71,7 @@ class VecDB:
     def build_index(self):
         print("Building index...")
         sample_size = min(self.n_records, 1_000_000)
-        batch_size = 100_000
+        batch_size = 1_000
 
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[:sample_size]
         vector_norms = np.linalg.norm(vectors, axis=1, keepdims=True)
