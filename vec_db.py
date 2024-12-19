@@ -50,8 +50,8 @@ class VecDB:
             self.nlist = 32
             self.n_probe = 5  
         else: 
-            self.nlist = 16
-            self.n_probe = 6  
+            self.nlist = 32
+            self.n_probe = 5  
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
