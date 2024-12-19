@@ -5,6 +5,7 @@ import faiss
 import gc
 from typing import List
 import time
+import heapq  # Import heapq to maintain a min-heap
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -128,9 +129,9 @@ class VecDB:
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
-        total_candidate_ids = []
-        total_similarities = []
         max_candidates_per_cluster = 100_000  # Adjust as needed
+        chunk_size = 10000  # Adjust as needed
+        min_heap = []  # This will be a min-heap of (similarity, candidate_id)
 
         for cluster_id in nearest_clusters:
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
@@ -147,76 +148,31 @@ class VecDB:
                 num_items_to_read = min(num_items, max_candidates_per_cluster)
                 f.seek(0)
 
-                # Define chunk_size
-                chunk_size = 10000  # Adjust as needed
-                per_cluster_candidate_ids = []
-                per_cluster_similarities = []
-
                 for start in range(0, num_items_to_read, chunk_size):
                     num_items_in_chunk = min(chunk_size, num_items_to_read - start)
                     candidate_ids_chunk = np.fromfile(f, dtype=dtype, count=num_items_in_chunk)
 
-                    if len(candidate_ids_chunk) == 0:
-                        continue
+                    for candidate_id in candidate_ids_chunk:
+                        candidate_vector = self.data[candidate_id]
+                        candidate_norm = np.linalg.norm(candidate_vector)
+                        similarity = candidate_vector.dot(query_vector) / (candidate_norm * query_norm)
 
-                    candidate_vectors = self.data[candidate_ids_chunk]
+                        if len(min_heap) < top_k:
+                            heapq.heappush(min_heap, (similarity, candidate_id))
+                        else:
+                            if similarity > min_heap[0][0]:
+                                # Pop the smallest similarity and push the new one
+                                heapq.heappushpop(min_heap, (similarity, candidate_id))
 
-                    # Compute similarities
-                    candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
-                    similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
-
-                    # Keep track of per cluster top_k candidates
-                    if top_k < len(similarities):
-                        top_indices = np.argpartition(-similarities, top_k - 1)[:top_k]
-                    else:
-                        top_indices = np.argsort(-similarities)[:top_k]
-
-                    per_cluster_candidate_ids.extend(candidate_ids_chunk[top_indices].tolist())
-                    per_cluster_similarities.extend(similarities[top_indices].tolist())
-
-                    # Delete variables to free RAM
+                    # Free memory
                     del candidate_ids_chunk
-                    del candidate_vectors
-                    del similarities
-                    del candidate_norms
-                    del top_indices
 
-                # After processing all chunks, keep top_k per cluster
-                if len(per_cluster_similarities) > top_k:
-                    per_cluster_similarities = np.array(per_cluster_similarities)
-                    per_cluster_candidate_ids = np.array(per_cluster_candidate_ids)
-                    top_indices = np.argpartition(-per_cluster_similarities, top_k - 1)[:top_k]
-                    per_cluster_candidate_ids = per_cluster_candidate_ids[top_indices]
-                    per_cluster_similarities = per_cluster_similarities[top_indices]
-                else:
-                    per_cluster_candidate_ids = np.array(per_cluster_candidate_ids)
-                    per_cluster_similarities = np.array(per_cluster_similarities)
-
-                # Accumulate total candidates
-                total_candidate_ids.extend(per_cluster_candidate_ids.tolist())
-                total_similarities.extend(per_cluster_similarities.tolist())
-
-                # Delete variables
-                del per_cluster_candidate_ids
-                del per_cluster_similarities
-
-        if len(total_candidate_ids) == 0:
+        if not min_heap:
             return list(range(min(top_k, self.n_records)))
 
-        # Now select top k from all combined candidates
-        total_similarities = np.array(total_similarities)
-        total_candidate_ids = np.array(total_candidate_ids)
-        if top_k < len(total_similarities):
-            top_indices = np.argpartition(-total_similarities, top_k - 1)[:top_k]
-        else:
-            top_indices = np.argsort(-total_similarities)[:top_k]
-
-        result = total_candidate_ids[top_indices].tolist()
-
-        # Clean up
-        del total_candidate_ids
-        del total_similarities
-        del top_indices
+        # Extract candidate_ids from the heap
+        top_candidates = heapq.nlargest(top_k, min_heap)
+        result = [candidate_id for similarity, candidate_id in top_candidates]
 
         return result
 
