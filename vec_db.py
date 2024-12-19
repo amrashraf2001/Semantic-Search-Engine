@@ -40,15 +40,18 @@ class VecDB:
             self.load_index()
 
     def _set_clustering_parameters(self):
-        if self.n_records <= 10 ** 6:
+        if self.n_records <= 1_000_000:  # Up to 1M records
             self.nlist = 32
             self.n_probe = 4
-        elif self.n_records <= 10 * 10 ** 6:
+        elif self.n_records <= 10_000_000:  # Up to 10M records
             self.nlist = 32
             self.n_probe = 4
-        else:
-            self.nlist = 32  # 64
-            self.n_probe = 5
+        elif self.n_records <= 15_000_000:  # Up to 15M records
+            self.nlist = 32
+            self.n_probe = 5  # Slightly increase n_probe to improve recall
+        else:  # For datasets larger than 15M records
+            self.nlist = 16
+            self.n_probe = 6  # Further increase n_probe to maintain performance
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
