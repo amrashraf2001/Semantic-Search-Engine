@@ -45,10 +45,10 @@ class VecDB:
             self.n_probe = 4
         elif self.n_records <= 10 * 10 ** 6:
             self.nlist = 32
-            self.n_probe = 6
+            self.n_probe = 4
         else:
-            self.nlist = 128
-            self.n_probe = 16
+            self.nlist = 64
+            self.n_probe = 5
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
