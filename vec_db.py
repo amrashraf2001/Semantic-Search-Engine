@@ -16,7 +16,7 @@ class VecDB:
         self.db_path = database_file_path
         self.index_file_path = index_file_path
         self.DIMENSION = DIMENSION
-        
+
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -52,7 +52,7 @@ class VecDB:
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
-            self.data = np.memmap(self.db_path, dtype=np.float32, mode='r', 
+            self.data = np.memmap(self.db_path, dtype=np.float32, mode='r',
                                   shape=(self.n_records, self.DIMENSION))
 
     def generate_database(self, size: int) -> None:
@@ -79,40 +79,45 @@ class VecDB:
         vectors = self.data[:buffer_size].copy()
         vector_norms = np.linalg.norm(vectors, axis=1)
         normalized_vectors = vectors / vector_norms[:, np.newaxis]
-        
+
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
-        
-        labels_path = os.path.join(self.index_file_path, "labels.memmap")
-        labels_memmap = np.memmap(labels_path, dtype='int32', mode='w+', shape=(self.n_records,))
-        
+
+        # Create per-cluster index files
+        cluster_files = {}
+        for cluster_id in range(self.nlist):
+            cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
+            cluster_files[cluster_id] = open(cluster_file_path, 'wb')
+
         for start in range(0, self.n_records, batch_size):
             end = min(start + batch_size, self.n_records)
             batch_vectors = self.data[start:end]
-            
+
             batch_norms = np.linalg.norm(batch_vectors, axis=1)
             normalized_batch = batch_vectors / batch_norms[:, np.newaxis]
-            
+
             similarities = normalized_batch.dot(kmeans.centroids.T)
             labels = np.argmax(similarities, axis=1).astype('int32')
-            
-            labels_memmap[start:end] = labels
-        
-        labels_memmap.flush()
-        del labels_memmap
+
+            for cluster_id in range(self.nlist):
+                cluster_indices = np.where(labels == cluster_id)[0] + start
+                # Write indices as uint32
+                cluster_indices.astype('uint32').tofile(cluster_files[cluster_id])
+
+        # Close the cluster files
+        for f in cluster_files.values():
+            f.close()
 
         np.save(os.path.join(self.index_file_path, "centroids.npy"), kmeans.centroids)
         print(f"Index saved to {self.index_file_path}")
 
     def load_index(self):
         centroids_path = os.path.join(self.index_file_path, "centroids.npy")
-        labels_path = os.path.join(self.index_file_path, "labels.memmap")
 
-        if not all(os.path.exists(p) for p in [centroids_path, labels_path]):
+        if not os.path.exists(centroids_path):
             raise FileNotFoundError("Index files not found. Please build the index first.")
 
         self.centroids = np.load(centroids_path)
-        self.labels = np.memmap(labels_path, dtype='int32', mode='r', shape=(self.n_records,))
         self._init_data_access()
         print(f"Index loaded from {self.index_file_path}")
 
@@ -122,39 +127,65 @@ class VecDB:
 
         query_vector = query_vector.reshape(-1)
         query_norm = np.linalg.norm(query_vector)
-        
+
         centroid_norms = np.linalg.norm(self.centroids, axis=1)
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
         candidate_ids = []
-        labels_chunk_size = 1_000_000
+        max_candidates_per_cluster = 100_000
+
         for cluster_id in nearest_clusters:
-            cluster_candidate_ids = []
-            for start in range(0, self.n_records, labels_chunk_size):
-                end = min(start + labels_chunk_size, self.n_records)
-                labels_chunk = self.labels[start:end]
-                indices = np.where(labels_chunk == cluster_id)[0] + start
-                cluster_candidate_ids.extend(indices.tolist())
-                if len(cluster_candidate_ids) >= 100_000:
-                    break
-            candidate_ids.extend(cluster_candidate_ids)
-        
+            cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
+
+            if not os.path.exists(cluster_file_path):
+                continue  # No data points in this cluster
+
+            # Read candidate IDs from the cluster file
+            with open(cluster_file_path, 'rb') as f:
+                # Read up to max_candidates_per_cluster indices
+                dtype = np.dtype('uint32')
+                itemsize = dtype.itemsize
+                # Get the total size of the file
+                f.seek(0, os.SEEK_END)
+                file_size = f.tell()
+                num_items = file_size // itemsize
+                num_items_to_read = min(num_items, max_candidates_per_cluster)
+                # Move back to start
+                f.seek(0)
+                # Read indices
+                cluster_candidate_ids = np.fromfile(f, dtype=dtype, count=num_items_to_read)
+
+            candidate_ids.extend(cluster_candidate_ids.tolist())
+
         if len(candidate_ids) < top_k:
             return list(range(min(top_k, self.n_records)))
 
         candidate_ids = np.array(candidate_ids)
-        candidate_vectors = self.data[candidate_ids]
-        
-        candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
-        similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
-        
+
+        # Process candidate_vectors in batches to limit RAM usage
+        batch_size = 10000  # Adjust as needed to limit RAM
+        similarities = []
+        candidate_ids_list = []
+
+        for start in range(0, len(candidate_ids), batch_size):
+            end = min(start + batch_size, len(candidate_ids))
+            batch_candidate_ids = candidate_ids[start:end]
+            batch_candidate_vectors = self.data[batch_candidate_ids]
+            batch_candidate_norms = np.linalg.norm(batch_candidate_vectors, axis=1)
+            batch_similarities = batch_candidate_vectors.dot(query_vector) / (batch_candidate_norms * query_norm)
+            similarities.extend(batch_similarities.tolist())
+            candidate_ids_list.extend(batch_candidate_ids.tolist())
+
+        similarities = np.array(similarities)
+        candidate_ids = np.array(candidate_ids_list)
+
         # Use heapq to find the top_k indices
         if top_k < len(similarities):
             top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
         else:
             top_indices = np.argsort(-similarities)[:top_k]
-        
+
         return candidate_ids[top_indices].tolist()
 
     def get_one_row(self, row_num: int) -> np.ndarray:
