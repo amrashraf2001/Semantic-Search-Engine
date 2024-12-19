@@ -47,8 +47,8 @@ class VecDB:
             self.nlist = 32
             self.n_probe = 4
         else:
-            self.nlist = 40
-            self.n_probe = 6
+            self.nlist = 32  # 64
+            self.n_probe = 5
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
@@ -71,7 +71,7 @@ class VecDB:
     def build_index(self):
         print("Building index...")
         sample_size = min(self.n_records, 1_000_000)
-        batch_size = 500
+        batch_size = 1_000
 
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[:sample_size]
         vector_norms = np.linalg.norm(vectors, axis=1, keepdims=True)
