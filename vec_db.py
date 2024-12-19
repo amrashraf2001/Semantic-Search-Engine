@@ -46,14 +46,8 @@ class VecDB:
         elif self.n_records <= 10 * 10 ** 6:
             self.nlist = 32
             self.n_probe = 4
-        elif self.n_records <= 15 * 10 ** 6:
-            self.nlist = 375
-            self.n_probe = 5
-        elif self.n_records <= 20 * 10 ** 6:
-            self.nlist = 475
-            self.n_probe = 5
         else:
-            self.nlist = 64
+            self.nlist = 32  # 64
             self.n_probe = 5
 
     def _init_data_access(self):
