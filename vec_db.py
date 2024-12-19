@@ -41,17 +41,11 @@ class VecDB:
 
     def _set_clustering_parameters(self):
         if self.n_records <= 10 ** 6:
-            self.nlist = 1000
+            self.nlist = 32
             self.n_probe = 4
         elif self.n_records <= 10 * 10 ** 6:
-            self.nlist = 1100
-            self.n_probe = 4
-        elif self.n_records <= 15 * 10 ** 6:
-            self.nlist = 400
-            self.n_probe = 16
-        elif self.n_records <= 20 * 10 ** 6:
-            self.nlist = 475
-            self.n_probe = 16
+            self.nlist = 64
+            self.n_probe = 8
         else:
             self.nlist = 128
             self.n_probe = 16
@@ -95,7 +89,6 @@ class VecDB:
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
             cluster_files[cluster_id] = open(cluster_file_path, 'wb')
 
-        batch_size = 100_000  # You can adjust this based on available RAM
         for start in range(0, self.n_records, batch_size):
             end = min(start + batch_size, self.n_records)
             batch_vectors = self.data[start:end]
@@ -109,12 +102,7 @@ class VecDB:
             for cluster_id in range(self.nlist):
                 cluster_indices = np.where(labels == cluster_id)[0] + start
                 # Write indices as uint32
-                if len(cluster_indices) > 0:
-                    cluster_indices.astype('uint32').tofile(cluster_files[cluster_id])
-
-            # Clean up
-            del batch_vectors, batch_norms, normalized_batch, similarities, labels
-            gc.collect()
+                cluster_indices.astype('uint32').tofile(cluster_files[cluster_id])
 
         # Close the cluster files
         for f in cluster_files.values():
@@ -144,12 +132,8 @@ class VecDB:
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
-        # Initialize a min-heap
-        heap = []
-        # Use a fixed-size min-heap to store top_k results
-        heap_size = top_k
-        max_candidates_per_cluster = 100_000  # Adjust as necessary
-        candidate_batch_size = 1000  # Adjust based on available RAM
+        candidate_ids = []
+        max_candidates_per_cluster = 100_000
 
         for cluster_id in nearest_clusters:
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
@@ -157,44 +141,52 @@ class VecDB:
             if not os.path.exists(cluster_file_path):
                 continue  # No data points in this cluster
 
+            # Read candidate IDs from the cluster file
             with open(cluster_file_path, 'rb') as f:
+                # Read up to max_candidates_per_cluster indices
                 dtype = np.dtype('uint32')
                 itemsize = dtype.itemsize
+                # Get the total size of the file
                 f.seek(0, os.SEEK_END)
                 file_size = f.tell()
                 num_items = file_size // itemsize
                 num_items_to_read = min(num_items, max_candidates_per_cluster)
+                # Move back to start
                 f.seek(0)
+                # Read indices
+                cluster_candidate_ids = np.fromfile(f, dtype=dtype, count=num_items_to_read)
 
-                num_read = 0
-                while num_read < num_items_to_read:
-                    batch_size = min(candidate_batch_size, num_items_to_read - num_read)
-                    batch_candidate_ids = np.fromfile(f, dtype=dtype, count=batch_size)
-                    num_read += batch_size
+            candidate_ids.extend(cluster_candidate_ids.tolist())
 
-                    # Read batch candidate vectors
-                    batch_candidate_vectors = self.data[batch_candidate_ids]
-                    batch_candidate_norms = np.linalg.norm(batch_candidate_vectors, axis=1)
-                    batch_similarities = batch_candidate_vectors.dot(query_vector) / (batch_candidate_norms * query_norm)
+        if len(candidate_ids) < top_k:
+            return list(range(min(top_k, self.n_records)))
 
-                    for sim, idx in zip(batch_similarities, batch_candidate_ids):
-                        if len(heap) < heap_size:
-                            heapq.heappush(heap, (sim, idx))
-                        else:
-                            if sim > heap[0][0]:
-                                heapq.heappushpop(heap, (sim, idx))
-                    # Clear batch data
-                    del batch_candidate_vectors, batch_candidate_norms, batch_similarities, batch_candidate_ids
-                    gc.collect()
+        candidate_ids = np.array(candidate_ids)
 
-        if not heap:
-            # If heap is empty, return empty list
-            return []
+        # Process candidate_vectors in batches to limit RAM usage
+        batch_size = 10000  # Adjust as needed to limit RAM
+        similarities = []
+        candidate_ids_list = []
 
-        # Extract top_k results from heap
-        heap.sort(reverse=True)  # Get highest similarities first
-        top_k_indices = [idx for sim, idx in heap]
-        return top_k_indices
+        for start in range(0, len(candidate_ids), batch_size):
+            end = min(start + batch_size, len(candidate_ids))
+            batch_candidate_ids = candidate_ids[start:end]
+            batch_candidate_vectors = self.data[batch_candidate_ids]
+            batch_candidate_norms = np.linalg.norm(batch_candidate_vectors, axis=1)
+            batch_similarities = batch_candidate_vectors.dot(query_vector) / (batch_candidate_norms * query_norm)
+            similarities.extend(batch_similarities.tolist())
+            candidate_ids_list.extend(batch_candidate_ids.tolist())
+
+        similarities = np.array(similarities)
+        candidate_ids = np.array(candidate_ids_list)
+
+        # Use heapq to find the top_k indices
+        if top_k < len(similarities):
+            top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
+        else:
+            top_indices = np.argsort(-similarities)[:top_k]
+
+        return candidate_ids[top_indices].tolist()
 
     def get_one_row(self, row_num: int) -> np.ndarray:
         if not hasattr(self, 'data'):
