@@ -5,7 +5,7 @@ import faiss
 import gc
 from typing import List
 import heapq
-import time
+from memory_profiler import memory_usage
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
@@ -73,17 +73,13 @@ class VecDB:
         sample_size = min(self.n_records, 1_000_000)
         batch_size = 100_000
 
-        # Use a smaller buffer for normalization and clustering
-        buffer_size = min(batch_size, sample_size)
-
-        vectors = self.data[:buffer_size].copy()
+        vectors = self.data[:sample_size].copy()
         vector_norms = np.linalg.norm(vectors, axis=1)
         normalized_vectors = vectors / vector_norms[:, np.newaxis]
 
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
 
-        # Create per-cluster index files
         cluster_files = {}
         for cluster_id in range(self.nlist):
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
@@ -101,10 +97,8 @@ class VecDB:
 
             for cluster_id in range(self.nlist):
                 cluster_indices = np.where(labels == cluster_id)[0] + start
-                # Write indices as uint32
                 cluster_indices.astype('uint32').tofile(cluster_files[cluster_id])
 
-        # Close the cluster files
         for f in cluster_files.values():
             f.close()
 
@@ -139,21 +133,16 @@ class VecDB:
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
 
             if not os.path.exists(cluster_file_path):
-                continue  # No data points in this cluster
+                continue
 
-            # Read candidate IDs from the cluster file
             with open(cluster_file_path, 'rb') as f:
-                # Read up to max_candidates_per_cluster indices
                 dtype = np.dtype('uint32')
                 itemsize = dtype.itemsize
-                # Get the total size of the file
                 f.seek(0, os.SEEK_END)
                 file_size = f.tell()
                 num_items = file_size // itemsize
                 num_items_to_read = min(num_items, max_candidates_per_cluster)
-                # Move back to start
                 f.seek(0)
-                # Read indices
                 cluster_candidate_ids = np.fromfile(f, dtype=dtype, count=num_items_to_read)
 
             candidate_ids.extend(cluster_candidate_ids.tolist())
@@ -162,9 +151,7 @@ class VecDB:
             return list(range(min(top_k, self.n_records)))
 
         candidate_ids = np.array(candidate_ids)
-
-        # Process candidate_vectors in batches to limit RAM usage
-        batch_size = 10000  # Adjust as needed to limit RAM
+        batch_size = 10000
         similarities = []
         candidate_ids_list = []
 
@@ -180,7 +167,6 @@ class VecDB:
         similarities = np.array(similarities)
         candidate_ids = np.array(candidate_ids_list)
 
-        # Use heapq to find the top_k indices
         if top_k < len(similarities):
             top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
         else:
@@ -202,8 +188,9 @@ class VecDB:
 
     def _get_num_records(self) -> int:
         return self.n_records
-
+    
     def __del__(self):
         if hasattr(self, 'data'):
             del self.data
         gc.collect()
+
