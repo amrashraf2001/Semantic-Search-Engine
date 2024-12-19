@@ -40,18 +40,18 @@ class VecDB:
             self.load_index()
 
     def _set_clustering_parameters(self):
-        if self.n_records <= 1_000_000:  # Up to 1M records
+        if self.n_records <= 1_000_000:
             self.nlist = 32
             self.n_probe = 4
-        elif self.n_records <= 10_000_000:  # Up to 10M records
+        elif self.n_records <= 10_000_000: 
             self.nlist = 32
             self.n_probe = 4
-        elif self.n_records <= 15_000_000:  # Up to 15M records
+        elif self.n_records <= 15_000_000:  
             self.nlist = 32
-            self.n_probe = 5  # Slightly increase n_probe to improve recall
-        else:  # For datasets larger than 15M records
+            self.n_probe = 5  
+        else: 
             self.nlist = 16
-            self.n_probe = 6  # Further increase n_probe to maintain performance
+            self.n_probe = 6  
 
     def _init_data_access(self):
         if not hasattr(self, 'data'):
@@ -129,7 +129,8 @@ class VecDB:
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
-        candidate_ids = []
+        total_candidate_ids = []
+        total_similarities = []
         max_candidates_per_cluster = 100_000
 
         for cluster_id in nearest_clusters:
@@ -148,30 +149,53 @@ class VecDB:
                 f.seek(0)
                 cluster_candidate_ids = np.fromfile(f, dtype=dtype, count=num_items_to_read)
 
-            candidate_ids.extend(cluster_candidate_ids.tolist())
+            candidate_ids = cluster_candidate_ids
 
-        if len(candidate_ids) < top_k:
+            if len(candidate_ids) == 0:
+                continue
+
+            # Process the candidate_ids for this cluster
+            similarities = []
+            for candidate_id in candidate_ids:
+                candidate_vector = self.data[candidate_id]
+                similarity = candidate_vector.dot(query_vector) / (np.linalg.norm(candidate_vector) * query_norm)
+                similarities.append(similarity)
+
+            # Keep track of the top k candidates from this cluster
+            similarities = np.array(similarities)
+            candidate_ids = np.array(candidate_ids)
+            if top_k < len(similarities):
+                top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
+            else:
+                top_indices = np.argsort(-similarities)[:top_k]
+
+            total_candidate_ids.extend(candidate_ids[top_indices].tolist())
+            total_similarities.extend(similarities[top_indices].tolist())
+
+            # Delete variables to free RAM
+            del similarities
+            del candidate_ids
+            del cluster_candidate_ids
+            del top_indices
+
+        if len(total_candidate_ids) == 0:
             return list(range(min(top_k, self.n_records)))
 
-        candidate_ids = np.array(candidate_ids)
-
-        similarities = []
-        candidate_ids_list = []
-        for candidate_id in candidate_ids:
-            candidate_vector = self.data[candidate_id]
-            similarity = candidate_vector.dot(query_vector) / (np.linalg.norm(candidate_vector) * query_norm)
-            similarities.append(similarity)
-            candidate_ids_list.append(candidate_id)
-
-        similarities = np.array(similarities)
-        candidate_ids = np.array(candidate_ids_list)
-
-        if top_k < len(similarities):
-            top_indices = heapq.nlargest(top_k, range(len(similarities)), similarities.take)
+        # Now select top k from all combined candidates
+        total_similarities = np.array(total_similarities)
+        total_candidate_ids = np.array(total_candidate_ids)
+        if top_k < len(total_similarities):
+            top_indices = heapq.nlargest(top_k, range(len(total_similarities)), total_similarities.take)
         else:
-            top_indices = np.argsort(-similarities)[:top_k]
+            top_indices = np.argsort(-total_similarities)[:top_k]
 
-        return candidate_ids[top_indices].tolist()
+        result = total_candidate_ids[top_indices].tolist()
+        # Clean up
+        del total_candidate_ids
+        del total_similarities
+        del top_indices
+
+        return result
 
     def get_one_row(self, row_num: int) -> np.ndarray:
         if not hasattr(self, 'data'):
