@@ -3,13 +3,11 @@ import numpy as np
 import os
 import faiss
 import gc
-from typing import List
-import time
-import heapq  # Import heapq to maintain a min-heap
+import heapq
 
 DB_SEED_NUMBER = 42
-ELEMENT_SIZE = np.dtype(np.float32).itemsize
-DIMENSION = 70
+ELEMENT_SIZE = np.dtype(np.float32).itemsize  # Size of a single float32 element
+DIMENSION = 70  # Dimensionality of the vectors
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index_dir", new_db=True, db_size=None):
@@ -43,43 +41,37 @@ class VecDB:
         if self.n_records <= 1_000_000:
             self.nlist = 32
             self.n_probe = 4
-        elif self.n_records <= 10_000_000: 
+        elif self.n_records <= 10_000_000:
             self.nlist = 32
             self.n_probe = 2
-        elif self.n_records <= 15_000_000:  
+        elif self.n_records <= 15_000_000:
             self.nlist = 32
-            self.n_probe = 1  
-        else: 
+            self.n_probe = 1
+        else:
             self.nlist = 32
-            self.n_probe = 1  
-
-    def _init_data_access(self):
-        if not hasattr(self, 'data'):
-            self.data = np.memmap(self.db_path, dtype=np.float32, mode='r',
-                                  shape=(self.n_records, self.DIMENSION))
+            self.n_probe = 1
 
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
         self._write_vectors_to_file(vectors)
-        self._init_data_access()
         self.build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
-        mmap_vectors = np.memmap(self.db_path, dtype=np.float32, mode='w+', shape=vectors.shape)
-        mmap_vectors[:] = vectors[:]
-        mmap_vectors.flush()
-        del mmap_vectors
+        # Write vectors to file directly
+        with open(self.db_path, 'wb') as f:
+            vectors.tofile(f)
 
     def build_index(self):
         print("Building index...")
         sample_size = min(self.n_records, 1_000_000)
         batch_size = 1_000
 
-        # Normalize vectors and sample for clustering
-        vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[:sample_size]
-        vector_norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        normalized_vectors = vectors / vector_norms
+        # Read a sample of the vectors for clustering
+        sample_vectors = self._read_vectors_from_file(0, sample_size)
+        # Normalize vectors
+        vector_norms = np.linalg.norm(sample_vectors, axis=1, keepdims=True)
+        normalized_vectors = sample_vectors / vector_norms
 
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
@@ -93,11 +85,9 @@ class VecDB:
         # Assign vectors to clusters in batches
         for start in range(0, self.n_records, batch_size):
             end = min(start + batch_size, self.n_records)
-            batch_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[start:end]
-
+            batch_vectors = self._read_vectors_from_file(start, end - start)
             batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
             normalized_batch = batch_vectors / batch_norms
-
             similarities = normalized_batch.dot(kmeans.centroids.T)
             labels = np.argmax(similarities, axis=1).astype('int32')
 
@@ -114,6 +104,19 @@ class VecDB:
         np.save(os.path.join(self.index_file_path, "centroids.npy"), kmeans.centroids)
         print(f"Index saved to {self.index_file_path}")
 
+    def _read_vectors_from_file(self, start_index: int, count: int) -> np.ndarray:
+        # Read a batch of vectors from the file
+        vectors = np.empty((count, self.DIMENSION), dtype=np.float32)
+        offset = start_index * self.DIMENSION * ELEMENT_SIZE
+        with open(self.db_path, 'rb') as f:
+            f.seek(offset)
+            for i in range(count):
+                vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
+                if not vector_bytes:
+                    break
+                vectors[i, :] = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+        return vectors
+
     def load_index(self):
         centroids_path = os.path.join(self.index_file_path, "centroids.npy")
 
@@ -121,7 +124,6 @@ class VecDB:
             raise FileNotFoundError("Index files not found. Please build the index first.")
 
         self.centroids = np.load(centroids_path)
-        self._init_data_access()
         print(f"Index loaded from {self.index_file_path}")
 
     def retrieve(self, query_vector, top_k=5):
@@ -159,8 +161,8 @@ class VecDB:
                         break
                     candidate_id = struct.unpack('I', candidate_id_bytes)[0]
 
-                    # Load candidate vector
-                    candidate_vector = self.data[candidate_id]
+                    # Read candidate vector from file
+                    candidate_vector = self._read_vector(candidate_id)
                     candidate_norm = np.linalg.norm(candidate_vector)
                     similarity = candidate_vector.dot(query_vector) / (candidate_norm * query_norm)
 
@@ -184,17 +186,30 @@ class VecDB:
 
         return result
 
+    def _read_vector(self, vector_id: int) -> np.ndarray:
+        # Read a vector from the file at the specified index
+        offset = vector_id * self.DIMENSION * ELEMENT_SIZE
+        with open(self.db_path, 'rb') as f:
+            f.seek(offset)
+            vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
+            vector = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+        return vector
+
     def get_one_row(self, row_num: int) -> np.ndarray:
-        if not hasattr(self, 'data'):
-            self._init_data_access()
         if row_num < 0 or row_num >= self.n_records:
             raise IndexError(f"Row number {row_num} is out of range.")
-        return self.data[row_num]
+        return self._read_vector(row_num)
 
     def get_all_rows(self) -> np.ndarray:
-        if not hasattr(self, 'data'):
-            self._init_data_access()
-        return self.data
+        # Not recommended for large databases due to memory constraints
+        vectors = np.empty((self.n_records, self.DIMENSION), dtype=np.float32)
+        with open(self.db_path, 'rb') as f:
+            for i in range(self.n_records):
+                vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
+                if not vector_bytes:
+                    break
+                vectors[i, :] = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+        return vectors
 
     def _get_num_records(self) -> int:
         return self.n_records
