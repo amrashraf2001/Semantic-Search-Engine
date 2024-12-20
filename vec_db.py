@@ -43,7 +43,7 @@ class VecDB:
             self.n_probe = 4
         elif self.n_records <= 10_000_000:
             self.nlist = 32
-            self.n_probe = 2
+            self.n_probe = 1
         elif self.n_records <= 15_000_000:
             self.nlist = 32
             self.n_probe = 1
