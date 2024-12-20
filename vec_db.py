@@ -6,8 +6,8 @@ import gc
 import heapq
 
 DB_SEED_NUMBER = 42
-ELEMENT_SIZE = np.dtype(np.float32).itemsize  # Size of a single float32 element
-DIMENSION = 70  # Dimensionality of the vectors
+ELEMENT_SIZE = np.dtype(np.float32).itemsize  
+DIMENSION = 70  
 
 class VecDB:
     def __init__(self, database_file_path="saved_db.dat", index_file_path="index_dir", new_db=True, db_size=None):
@@ -58,7 +58,6 @@ class VecDB:
         self.build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
-        # Write vectors to file directly
         with open(self.db_path, 'wb') as f:
             vectors.tofile(f)
 
@@ -191,7 +190,6 @@ class VecDB:
         return result
 
     def _read_vectors_by_ids(self, ids: np.ndarray) -> np.ndarray:
-        # Read multiple vectors from the file given their IDs
         count = len(ids)
         vectors = np.empty((count, self.DIMENSION), dtype=np.float32)
         with open(self.db_path, 'rb') as f:
@@ -208,7 +206,6 @@ class VecDB:
         return self._read_vector(row_num)
 
     def _read_vector(self, vector_id: int) -> np.ndarray:
-        # Read a vector from the file at the specified index
         offset = vector_id * self.DIMENSION * ELEMENT_SIZE
         with open(self.db_path, 'rb') as f:
             f.seek(offset)
@@ -217,7 +214,6 @@ class VecDB:
         return vector
 
     def get_all_rows(self) -> np.ndarray:
-        # Not recommended for large databases due to memory constraints
         vectors = np.empty((self.n_records, self.DIMENSION), dtype=np.float32)
         with open(self.db_path, 'rb') as f:
             data = f.read()
