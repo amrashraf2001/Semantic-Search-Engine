@@ -76,6 +76,7 @@ class VecDB:
         sample_size = min(self.n_records, 1_000_000)
         batch_size = 1_000
 
+        # Normalize vectors and sample for clustering
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[:sample_size]
         vector_norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         normalized_vectors = vectors / vector_norms
@@ -83,11 +84,13 @@ class VecDB:
         kmeans = faiss.Kmeans(self.DIMENSION, self.nlist, niter=20, verbose=True, seed=DB_SEED_NUMBER)
         kmeans.train(normalized_vectors.astype(np.float32))
 
+        # Initialize cluster files
         cluster_files = {}
         for cluster_id in range(self.nlist):
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
             cluster_files[cluster_id] = open(cluster_file_path, 'wb')
 
+        # Assign vectors to clusters in batches
         for start in range(0, self.n_records, batch_size):
             end = min(start + batch_size, self.n_records)
             batch_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(self.n_records, self.DIMENSION))[start:end]
@@ -101,6 +104,9 @@ class VecDB:
             for cluster_id in range(self.nlist):
                 cluster_indices = np.where(labels == cluster_id)[0] + start
                 cluster_indices.astype('uint32').tofile(cluster_files[cluster_id])
+
+            # Free memory to keep RAM usage low
+            del batch_vectors, batch_norms, normalized_batch, similarities, labels
 
         for f in cluster_files.values():
             f.close()
@@ -125,13 +131,14 @@ class VecDB:
         query_vector = query_vector.reshape(-1)
         query_norm = np.linalg.norm(query_vector)
 
+        # Compute similarities to centroids
         centroid_norms = np.linalg.norm(self.centroids, axis=1)
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
-        max_candidates_per_cluster = 100_000  # Adjust as needed
-        chunk_size = 10000  # Adjust as needed
-        min_heap = []  # This will be a min-heap of (similarity, candidate_id)
+        max_candidates_per_cluster = 50_000  # Reduced to limit total number of candidates
+        chunk_size = 5_000  # Reduced chunk size to limit per-batch memory usage
+        min_heap = []  # Min-heap to store top candidates
 
         for cluster_id in nearest_clusters:
             cluster_file_path = os.path.join(self.index_file_path, f"cluster_{cluster_id}.indices")
@@ -152,25 +159,27 @@ class VecDB:
                     num_items_in_chunk = min(chunk_size, num_items_to_read - start)
                     candidate_ids_chunk = np.fromfile(f, dtype=dtype, count=num_items_in_chunk)
 
-                    for candidate_id in candidate_ids_chunk:
-                        candidate_vector = self.data[candidate_id]
-                        candidate_norm = np.linalg.norm(candidate_vector)
-                        similarity = candidate_vector.dot(query_vector) / (candidate_norm * query_norm)
+                    # Load candidate vectors in batches to limit memory usage
+                    candidate_vectors = self.data[candidate_ids_chunk]
+                    candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
+                    similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
 
+                    # Update the min-heap with candidate similarities
+                    for sim, candidate_id in zip(similarities, candidate_ids_chunk):
                         if len(min_heap) < top_k:
-                            heapq.heappush(min_heap, (similarity, candidate_id))
+                            heapq.heappush(min_heap, (sim, candidate_id))
                         else:
-                            if similarity > min_heap[0][0]:
-                                # Pop the smallest similarity and push the new one
-                                heapq.heappushpop(min_heap, (similarity, candidate_id))
+                            if sim > min_heap[0][0]:
+                                heapq.heappushpop(min_heap, (sim, candidate_id))
 
-                    # Free memory
-                    del candidate_ids_chunk
+                    # Free memory used by batch variables
+                    del candidate_ids_chunk, candidate_vectors, candidate_norms, similarities
 
         if not min_heap:
+            # If no candidates found, return default indices
             return list(range(min(top_k, self.n_records)))
 
-        # Extract candidate_ids from the heap
+        # Retrieve top candidates from the heap
         top_candidates = heapq.nlargest(top_k, min_heap)
         result = [candidate_id for similarity, candidate_id in top_candidates]
 
