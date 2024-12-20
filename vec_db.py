@@ -110,11 +110,9 @@ class VecDB:
         offset = start_index * self.DIMENSION * ELEMENT_SIZE
         with open(self.db_path, 'rb') as f:
             f.seek(offset)
-            for i in range(count):
-                vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
-                if not vector_bytes:
-                    break
-                vectors[i, :] = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+            bytes_to_read = count * self.DIMENSION * ELEMENT_SIZE
+            data = f.read(bytes_to_read)
+            vectors = np.frombuffer(data, dtype='float32').reshape(-1, self.DIMENSION)
         return vectors
 
     def load_index(self):
@@ -138,6 +136,13 @@ class VecDB:
         centroid_similarities = self.centroids.dot(query_vector) / (centroid_norms * query_norm)
         nearest_clusters = np.argpartition(centroid_similarities, -self.n_probe)[-self.n_probe:]
 
+        max_RAM_usage = 20 * 1024 * 1024  # 20 MB in bytes
+        vector_size = self.DIMENSION * ELEMENT_SIZE  # Size of one vector in bytes
+        max_vectors_in_RAM = max_RAM_usage // vector_size  # Max number of vectors to load into RAM
+
+        # To ensure we don't exceed RAM limit, we calculate chunk size
+        chunk_size = max(1, int(max_vectors_in_RAM / self.n_probe / 2))  # Divided by n_probe and 2 for safety
+
         min_heap = []  # Min-heap to store top candidates
 
         for cluster_id in nearest_clusters:
@@ -154,27 +159,26 @@ class VecDB:
                 num_items = file_size // itemsize
                 f.seek(0)
 
-                # Read candidate IDs one by one to keep memory usage low
-                for _ in range(num_items):
-                    candidate_id_bytes = f.read(itemsize)
-                    if not candidate_id_bytes:
-                        break
-                    candidate_id = struct.unpack('I', candidate_id_bytes)[0]
+                # Read candidate IDs in chunks to keep memory usage low
+                for start in range(0, num_items, chunk_size):
+                    count = min(chunk_size, num_items - start)
+                    candidate_ids_chunk = np.fromfile(f, dtype=dtype, count=count)
 
-                    # Read candidate vector from file
-                    candidate_vector = self._read_vector(candidate_id)
-                    candidate_norm = np.linalg.norm(candidate_vector)
-                    similarity = candidate_vector.dot(query_vector) / (candidate_norm * query_norm)
+                    # Read candidate vectors in batch
+                    candidate_vectors = self._read_vectors_by_ids(candidate_ids_chunk)
+                    candidate_norms = np.linalg.norm(candidate_vectors, axis=1)
+                    similarities = candidate_vectors.dot(query_vector) / (candidate_norms * query_norm)
 
-                    # Update the min-heap with candidate similarity
-                    if len(min_heap) < top_k:
-                        heapq.heappush(min_heap, (similarity, candidate_id))
-                    else:
-                        if similarity > min_heap[0][0]:
-                            heapq.heappushpop(min_heap, (similarity, candidate_id))
+                    # Update the min-heap with candidate similarities
+                    for sim, candidate_id in zip(similarities, candidate_ids_chunk):
+                        if len(min_heap) < top_k:
+                            heapq.heappush(min_heap, (sim, candidate_id))
+                        else:
+                            if sim > min_heap[0][0]:
+                                heapq.heappushpop(min_heap, (sim, candidate_id))
 
-                    # Free the candidate_vector reference
-                    del candidate_vector
+                    # Free memory used by batch variables
+                    del candidate_ids_chunk, candidate_vectors, candidate_norms, similarities
 
         if not min_heap:
             # If no candidates found, return default indices
@@ -186,6 +190,23 @@ class VecDB:
 
         return result
 
+    def _read_vectors_by_ids(self, ids: np.ndarray) -> np.ndarray:
+        # Read multiple vectors from the file given their IDs
+        count = len(ids)
+        vectors = np.empty((count, self.DIMENSION), dtype=np.float32)
+        with open(self.db_path, 'rb') as f:
+            for i, vector_id in enumerate(ids):
+                offset = vector_id * self.DIMENSION * ELEMENT_SIZE
+                f.seek(offset)
+                vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
+                vectors[i, :] = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+        return vectors
+
+    def get_one_row(self, row_num: int) -> np.ndarray:
+        if row_num < 0 or row_num >= self.n_records:
+            raise IndexError(f"Row number {row_num} is out of range.")
+        return self._read_vector(row_num)
+
     def _read_vector(self, vector_id: int) -> np.ndarray:
         # Read a vector from the file at the specified index
         offset = vector_id * self.DIMENSION * ELEMENT_SIZE
@@ -195,26 +216,16 @@ class VecDB:
             vector = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
         return vector
 
-    def get_one_row(self, row_num: int) -> np.ndarray:
-        if row_num < 0 or row_num >= self.n_records:
-            raise IndexError(f"Row number {row_num} is out of range.")
-        return self._read_vector(row_num)
-
     def get_all_rows(self) -> np.ndarray:
         # Not recommended for large databases due to memory constraints
         vectors = np.empty((self.n_records, self.DIMENSION), dtype=np.float32)
         with open(self.db_path, 'rb') as f:
-            for i in range(self.n_records):
-                vector_bytes = f.read(self.DIMENSION * ELEMENT_SIZE)
-                if not vector_bytes:
-                    break
-                vectors[i, :] = np.frombuffer(vector_bytes, dtype='float32', count=self.DIMENSION)
+            data = f.read()
+            vectors = np.frombuffer(data, dtype='float32').reshape(-1, self.DIMENSION)
         return vectors
 
     def _get_num_records(self) -> int:
         return self.n_records
 
     def __del__(self):
-        if hasattr(self, 'data'):
-            del self.data
         gc.collect()
