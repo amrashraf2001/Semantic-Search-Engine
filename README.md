@@ -33,3 +33,8 @@ usage effectively.
 scores. 
 • Result Compilation: 
 • The indices of the top candidates are returned as the result of the retrieval process. 
+
+
+## Results
+![image](https://github.com/user-attachments/assets/786e600c-0513-4f25-b93c-324881efbfb0)
+
