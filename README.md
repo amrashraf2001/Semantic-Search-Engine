@@ -1,8 +1,8 @@
 # Semantic Search Engine with Vectorized Databases
 This repository contains the code and documentation for a simple semantic search engine with vectorized databases and the evaluation of its performance. The project focuses on building an efficient indexing system to retrieve information based on vector space embeddings.
 
-Detailed Explanation 
-Building the Index 
+# Detailed Explanation 
+## Building the Index 
 • Clustering with K-Means: 
 • A sample of the vectors (up to 1,000,000) is used to train a K-Means model, which 
 helps partition the dataset into nlist clusters. 
@@ -19,7 +19,7 @@ the index_dir directory.
 the retrieval process. 
   
  
-Retrieval Process 
+## Retrieval Process 
 • Query Handling: 
 • A query vector is normalized and compared against the centroids to determine the 
 nearest clusters. 
