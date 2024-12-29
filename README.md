@@ -1,40 +1,35 @@
 # Semantic Search Engine with Vectorized Databases
 This repository contains the code and documentation for a simple semantic search engine with vectorized databases and the evaluation of its performance. The project focuses on building an efficient indexing system to retrieve information based on vector space embeddings.
 
-## Project Overview
-
-The key components of the project include:
-- `VecDB`: A class representing the vectorized database, responsible for storing and retrieving vectors.
-- `generate_database()`: A method to generate a random database.
-- `get_one_row()`: A method to get one row from the database given its index.
-- `insert_records()`: A method to insert multiple records into the database. It then rebuilds the index.
-- `retrieve()`: A method to retrieve the top-k most similar based on a given query vector.
-- `_cal_score()`: A helper method to calculate the cosine similarity between two vectors.
-- `_build_index()`: A placeholder method for implementing an indexing mechanism.
-
-## Getting Started
-
-To get started with the project, follow these steps:
-1. Clone the repository to your local machine.
-2. Run the provided code (which is almost the worst implementation of DB) and then edit/update the VecDB class as per the project requirements.
-3. Customize the code and add any additional features as needed. However, avoid modifying the DB_SEED_NUMBER, or the VecDB.\_\_init__ & VecDB.retrieve method signature.
-4. Run the evaluation to assess the accuracy of your implementation. The final evaluation will use the 'eval' function, but I wil update the 'run_queries' function.
-
-## Usage
-
-The project provides a `VecDB` class that you can use to interact with the vectorized database. Here's an example of how to use it:
-
-```python
-import numpy as np
-from vec_db import VecDB
-
-# Create an instance of VecDB and random DB of size 10K
-db = VecDB(db_size = 10**4)
-
-# Retrieve similar images for a given query
-query_vector = np.random.rand(1,70) # Query vector of dimension 70
-similar_images = db.retrieve(query_vector, top_k=5)
-print(similar_images)
-```
-
-Feel free to customize the code to suit your specific use case.
+Detailed Explanation 
+Building the Index 
+• Clustering with K-Means: 
+• A sample of the vectors (up to 1,000,000) is used to train a K-Means model, which 
+helps partition the dataset into nlist clusters. 
+• The centroids from K-Means represent cluster centers and are saved for later use 
+during queries. 
+• Vectors are normalized to unit length to facilitate cosine similarity calculations. 
+• Assigning Vectors to Clusters: 
+• Vectors are assigned to the nearest clusters based on cosine similarity with the 
+centroids. 
+• Each cluster's indices are saved in separate files (cluster_*.indices) within 
+the index_dir directory. 
+• Storing Centroids: 
+• The centroids are saved in a NumPy file (centroids.npy) to be quickly loaded during 
+the retrieval process. 
+  
+ 
+Retrieval Process 
+• Query Handling: 
+• A query vector is normalized and compared against the centroids to determine the 
+nearest clusters. 
+• The system uses cosine similarity to find the closest n_probe clusters, focusing the 
+search on the most relevant partitions of the dataset. 
+• Candidate Selection and Similarity Computation: 
+• Candidate vectors from the selected clusters are loaded in batches to manage memory 
+usage effectively. 
+• Cosine similarities between the query vector and candidate vectors are computed. 
+• A min-heap is used to keep track of the top k candidates with the highest similarity 
+scores. 
+• Result Compilation: 
+• The indices of the top candidates are returned as the result of the retrieval process. 
